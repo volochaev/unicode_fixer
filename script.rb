@@ -1,9 +1,13 @@
+require 'pry'
+require 'yaml'
+
 class FormatChecker
   ALLOWED_EXTENSIONS = %w(.yml .slim .haml)
 
   def initialize
     @changes = false
-    @count = 0
+    @total_count = 0
+    @default_encoding = nil
 
     puts "Enter filename or path to folder, allowed extensions is: #{ALLOWED_EXTENSIONS.join(', ')}."
     puts "Current path is #{Dir.pwd}"
@@ -16,7 +20,7 @@ class FormatChecker
               puts "\033[31mWARNING: Using current directory. Are you sure? [y/n]\033[0m"
               $stdin.gets.chomp == 'y' ? Dir.pwd : return
             else
-              input
+              input.strip
             end
 
     if ALLOWED_EXTENSIONS.include?(File.extname(input)) && File.exists?(input)
@@ -27,7 +31,7 @@ class FormatChecker
       puts "File or folder not specified or doesn't fit extension requirements."
     end
 
-    puts "Problems: #{@count}"
+    puts "Problems: #{@total_count}"
   end
 
   private
@@ -45,52 +49,91 @@ class FormatChecker
     end
   end
 
-  def perform_in_file(file)
-    file = File.open(file, 'r')
+  def perform_in_file(input_file)
+    file, errors_count, lines = File.open(input_file, 'r'), 0, []
+
+
+    if File.extname(input_file) == '.yml'
+      yml_valid = yaml_valid?(input_file)
+      puts "\033[33mChecking YAML structure. Valid: #{yml_valid}\033[0m"
+    end
 
     file.each_line.with_index do |string, index|
       string.force_encoding "utf-8"
       unless string.valid_encoding?
-        @count = @count + 1
-        puts "\033[31mLine: #{index + 1}. Problem - #{string.strip}\033[0m"
-        # puts "\033[31m#{string.dec_to_utf8}\033[0m"
-        puts "\033[34m#{string.latin1_to_utf8}\033[0m"
-        puts "\033[34m#{string.cp1252_to_utf8}\033[0m"
-        # puts "\033[31m#{string.utf16le_to_utf8}\033[0m"
+        errors_count += 1
+        lines << index + 1
       end
+    end
+
+    file.close
+
+    if errors_count >= 1
+      puts "\033[31m#{errors_count} errors was found.\033[0m"
+      puts "Lines: #{lines.join(', ')}" if lines.any?
+      puts "Fix errors? [y/n]"
+
+      case $stdin.gets.chomp
+      when 'y'
+        puts "Saving backup"
+        file = File.open(input_file, 'r')
+        FileUtils.mv(file.path, file.path << '_backup')
+
+        tempfile = File.open("#{input_file}_new", 'w+')
+
+        file.each_line do |line|
+          if line.valid_encoding?
+            tempfile << line
+          else
+            tempfile << encode(line)
+          end
+        end
+
+        file.close
+        File.rename("#{input_file}_new", input_file)
+        tempfile.close
+      end
+      @total_count += errors_count
     end
   end
 
-  def valid
+  def encode(line)
+    unless @default_encoding
+      puts "\033[35mUnmodified: #{line.strip}\033[0m"
+      puts "\033[33mChoose encoding: [1/2/default 1/default 2]\033[0m"
+      puts "[1 @ ISO-8859-1] #{line.latin1_to_utf8.strip}"
+      puts "[2 @ CP1252] #{line.cp1252_to_utf8.strip}"
+      puts "\033[33mIf you choose any of the `default *` options it will be automatically applied for next errors. Use with caution.\033[0m"
+      puts "[default 1] Set default encoding as ISO-8859-1"
+      puts "[default 2] Set default encoding as CP1252"
+    end
 
+    format line
   end
-end
 
-class Formatter
-  def initialize
+  def format(line)
+    output =  case @default_encoding || $stdin.gets.chomp
+              when '1' then line.latin1_to_utf8
+              when '2' then line.cp1252_to_utf8
+              when /\Adefault\s(\d)\z/i then @default_encoding = $1 and format(line)
+              end
+    output.force_encoding "utf-8"
+  end
 
+  def yaml_valid?(file)
+    !!YAML.load_file(file)
   end
 end
 
 class String
   require 'iconv'
+  # original: http://dzone.com/snippets/utf8-aware-string-methods-ruby
 
   # taken from: http://www.w3.org/International/questions/qa-forms-utf-8
   UTF8REGEX = /\A(?:[\x09\x0A\x0D\x20-\x7E] | [\xC2-\xDF][\x80-\xBF] | \xE0[\xA0-\xBF][\x80-\xBF] | [\xE1-\xEC\xEE\xEF][\x80-\xBF]{2} | \xED[\x80-\x9F][\x80-\xBF] | \xF0[\x90-\xBF][\x80-\xBF]{2} | [\xF1-\xF3][\x80-\xBF]{3} | \xF4[\x80-\x8F][\x80-\xBF]{2})*\z/mnx
 
   def utf8?
     self.force_encoding('ASCII-8BIT') =~ UTF8REGEX
-  end
-
-  def clean_utf8
-      t = ""
-      self.scan(/./um) { |c| t << c if c =~ UTF8REGEX }
-      t
-  end
-
-  # cf. Paul Battley, http://po-ru.com/diary/fixing-invalid-utf-8-in-ruby-revisited/
-  def validate_utf8
-     Iconv.iconv('UTF-8//IGNORE', 'UTF-8', (self + ' ') ).first[0..-2]
   end
 
   def latin1_to_utf8 # ISO-8859-1 to UTF-8
